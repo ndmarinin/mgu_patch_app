@@ -39,6 +39,8 @@ func (s *patchServer) handler() http.Handler {
 			method = http.MethodGet
 		case "/patch", "/restore", "/restart":
 			method = http.MethodPost
+		case "/firmware", "/check":
+			method = http.MethodGet
 		default:
 			fail(http.StatusNotFound, "unknown request")
 			return
@@ -79,6 +81,17 @@ func (s *patchServer) handler() http.Handler {
 			result, err = applyPatch(s.loc)
 		case "/restore":
 			result, err = restoreBackup(s.loc)
+		case "/firmware":
+			result = Status{Version: toolVersion, Firmware: firmwareStatus(s.loc)}
+		case "/check":
+			result, fw, err := checkPatch(s.loc)
+			if err != nil {
+				result = Status{Version: toolVersion, Firmware: fw, Message: err.Error()}
+				_ = json.NewEncoder(w).Encode(result)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(result)
+			return
 		case "/restart":
 			restart := s.restart
 			if restart == nil {
@@ -161,6 +174,12 @@ func main() {
 		return
 	}
 	s := &patchServer{loc: unitLocations(), root: true}
+	// Startup self-check: detect transitional/broken verifier state and warn.
+	// If backups exist but the binary is in an ambiguous state, the admin
+	// should restore before the service accepts patch/restore requests.
+	if fw := detectFirmware(s.loc); fw.Compatibility == FirmwareUnknown {
+		fmt.Fprintf(os.Stderr, "FSC patch service: %s\n", fw.Message)
+	}
 	ln, e := openControlSocket(*socket, *gid)
 	if e != nil {
 		panic(e)

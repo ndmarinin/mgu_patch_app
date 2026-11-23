@@ -5,6 +5,55 @@ Version 1.0.0 supports the inspected BAC4x build with stock SHA-256
 Unknown builds are refused before live changes. A matching stock binary backup
 is required to repair an incomplete patch.
 
+## Firmware compatibility registry
+
+The service maintains a firmware compatibility registry in
+`native/mgu-fscpatch/data_embedded.go`. Before any patch, it:
+
+1. Detects the running firmware from BMW version files (e.g. `/etc/version`)
+   or falls back to the verifier binary's SHA-256.
+2. Looks up the firmware in the registry.
+3. Refuses to patch if the firmware is unknown or the binary hash/size does
+   not match the registered profile.
+
+To add support for a new firmware build:
+
+1. Extract `/usr/bin/BAC4x_VSTAR_i386_Eth_Application.out` from the head unit.
+2. Compute its SHA-256 and size.
+3. Find the stock pattern (anti-drift prefix at the patch site) and the
+   local public modulus offsets.
+4. Add a `FirmwareProfile` entry in `data_embedded.go`'s `firmwareRegistry`.
+5. Map a human-readable version string (e.g. `"P18_23w44.2-1-3"`) to the
+   profile key in `firmwareIDByVersion`.
+6. Rebuild and reinstall the service.
+
+Until a profile is registered, the Patch button is disabled and the service
+refuses all modifications — preventing the transitional verifier state that
+caused boot loops on unregistered firmware.
+
+## Snapshot manifests
+
+Every successful patch writes a snapshot manifest to
+`/var/opt/mgu-fscpatch/fscpatch-snapshot-<timestamp>.json` recording:
+
+- Firmware ID and name
+- Binary SHA-256 and size
+- Block SHA-256 and presence
+- Whether the binary was already patched
+- Creation timestamp
+
+Restore operations verify that the current system state matches a snapshot
+before restoring backups, preventing cross-firmware restores.
+
+## Boot-time guard
+
+The `autosaronlinux.service` drop-in runs `mgu-fscpatch --commit-block` as
+`ExecStartPre` after persistence mounts and before the verifier loads NVM.
+If a pending support-block job's binary hash does not match the installed
+binary, the job is retained for inspection and no change is committed. This
+prevents a stale patch job from being applied across a firmware change or
+interrupted patch.
+
 The factory modulus stays intact. A position-independent x86-64 wrapper calls
 the original CAL signature verifier with the factory key first. Only an invalid
 signature (`0xf9`) for the FSC key descriptor permits a second call with the
@@ -32,6 +81,16 @@ The app's Restart head unit action needs a second press within eight seconds.
 POST /restart requests `/usr/bin/nsm_control --requestRestart 7 --normal`, using
 the same unit restart mechanism as the Store. NSM refusal and timeout are
 reported. Restart shares the operation mutex and root/method/body checks.
+
+### HTTP API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/status` | GET | Full status including binary, block, backups, and firmware compatibility |
+| `/patch` | POST | Apply patch (requires root, double-confirmed in UI) |
+| `/restore` | POST | Restore from backup (requires root) |
+| `/firmware` | GET | Detected firmware and compatibility status |
+| `/check` | GET | Dry-run validation: reports whether patch would be accepted, without writing |
 
 Validation: the native suite runs under Linux 4.14.328 in QEMU with a temporary
 ext4 disk, read-only tmpfs mounts and executing ELF fixtures. A production-code

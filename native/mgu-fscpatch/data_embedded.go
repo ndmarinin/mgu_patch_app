@@ -1009,3 +1009,124 @@ var legacyModulusPrefix = []byte{
 	0xa6, 0xe0, 0x05, 0x67, 0x7b, 0xf9, 0xd8, 0x6a, 0x0e, 0xf7, 0xc4, 0x49, 0x12, 0x2b, 0x38, 0xe7,
 	0x2d, 0x1f, 0xe6, 0x37, 0x2b, 0x2d, 0x91, 0x4f, 0x40, 0x99, 0xab, 0x17,
 }
+
+// ---------------------------------------------------------------------------
+// Firmware compatibility registry
+// ---------------------------------------------------------------------------
+
+// FirmwareCompatibility is reported by GET /firmware and by /status.
+type FirmwareCompatibility string
+
+const (
+	FirmwareUnknown      FirmwareCompatibility = "unknown"
+	FirmwareIncompatible FirmwareCompatibility = "incompatible"
+	FirmwareCompatible   FirmwareCompatibility = "compatible"
+)
+
+// FirmwareInfo describes the detected running firmware and its patch status.
+type FirmwareInfo struct {
+	ID             string                 `json:"id"`
+	Name           string                 `json:"name"`
+	Compatibility  FirmwareCompatibility  `json:"compatibility"`
+	Source         string                 `json:"source"` // "version-file", "binary-hash", "fallback"
+	BinarySHA256   string                 `json:"binarySha256,omitempty"`
+	BinarySize     int64                  `json:"binarySize,omitempty"`
+	Message        string                 `json:"message,omitempty"`
+}
+
+// FirmwareProfile describes one supported BAC4x verifier build.
+// The dual-* fields describe the position-independent patch layout used by
+// buildDualProfile. A profile is only usable when the target binary matches
+// BinarySHA256 and BinarySize exactly; otherwise the patch is refused.
+type FirmwareProfile struct {
+	ID               string
+	Name             string
+	BinarySHA256     string
+	BinarySize       int64
+	StockPattern     []byte
+	PatchedModulus   []byte
+	StockModulusSHA  string
+	DualEntry        uint64
+	DualNote         uint64
+	DualFile         uint64
+	DualVA           uint64
+	DualModulus      uint64
+	DualMagic        string
+	DualPrologue     []byte
+	DualOriginalNote []byte
+	DualPayload      []byte
+	DualLocalModulus int
+}
+
+// firmwareRegistry maps firmware identifiers (I-Step / software version strings)
+// to their patch profiles. Unknown firmware is never patched.
+var firmwareRegistry = map[string]FirmwareProfile{
+
+	// v1.0.0 inspected build: BMW MGU iDrive 7, stock SHA-256
+	// b26d18308c0f2ca1edd5aff8c373aa3aa659751e940cb6eed8509873670c1231
+	"b26d18308c0f2ca1edd5aff8c373aa3aa659751e940cb6eed8509873670c1231": {
+		ID:               "b26d18308c0f2ca1edd5aff8c373aa3aa659751e940cb6eed8509873670c1231",
+		Name:             "BAC4x VSTAR i386 Eth Application (inspected build)",
+		BinarySHA256:     "b26d18308c0f2ca1edd5aff8c373aa3aa659751e940cb6eed8509873670c1231",
+		BinarySize:       dualStockSize,
+		StockPattern:     stockPattern,
+		PatchedModulus:   patchedModulus,
+		StockModulusSHA:  stockModulusSHA256,
+		DualEntry:        dualEntry,
+		DualNote:         dualNote,
+		DualFile:         dualFile,
+		DualVA:           dualVA,
+		DualModulus:      dualModulus,
+		DualMagic:        dualMagic,
+		DualPrologue:     dualPrologue,
+		DualOriginalNote: dualOriginalNote,
+		DualPayload:      dualPayload,
+		DualLocalModulus: dualLocalModulus,
+	},
+
+	// PLACEHOLDER: BMW MGU P18_23w44.2-1-3 mgu-high (reported in ISSUE #2)
+	//
+	// To support this firmware, extract /usr/bin/BAC4x_VSTAR_i386_Eth_Application.out
+	// from the affected head unit, compute its SHA-256, and replace the placeholder
+	// values below. Until a matching profile is added, this build is refused.
+	//
+	// "P18_23w44.2-1-3": {
+	//     ID:               "P18_23w44.2-1-3",
+	//     Name:             "BMW MGU P18_23w44.2-1-3 mgu-high",
+	//     BinarySHA256:     "<sha256 of the BAC4x binary from this firmware>",
+	//     BinarySize:       <size in bytes>,
+	//     StockPattern:     <32-byte anti-drift prefix at the patch site>,
+	//     PatchedModulus:   <256-byte local public modulus for this build>,
+	//     StockModulusSHA:  "<sha256 of the stock 256-byte modulus>",
+	//     DualEntry:        <entry-point offset>,
+	//     ...
+	// },
+
+}
+
+// firmwareIDByVersion maps human-readable version strings (e.g. "P18_23w44.2-1-3")
+// to registry keys (binary SHA-256). Populated in init().
+var firmwareIDByVersion = make(map[string]string)
+
+// firmwareByID looks up a profile by its binary SHA-256 or version string.
+func firmwareByID(id string) (FirmwareProfile, bool) {
+	p, ok := firmwareRegistry[id]
+	if ok {
+		return p, true
+	}
+	// Try version-string lookup
+	if key, ok := firmwareIDByVersion[id]; ok {
+		p, ok = firmwareRegistry[key]
+		return p, ok
+	}
+	return FirmwareProfile{}, false
+}
+
+// supportedFirmwareIDs returns all registered firmware identifiers.
+func supportedFirmwareIDs() []string {
+	ids := make([]string, 0, len(firmwareRegistry))
+	for id := range firmwareRegistry {
+		ids = append(ids, id)
+	}
+	return ids
+}

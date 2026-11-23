@@ -36,6 +36,11 @@ func pendingUpdate(loc Locations, binary, block []byte, merge bool) (*fileUpdate
 // ExecStartPre runs after persistency-fs.target and before the verifier reads
 // its NVM cache. The unit ignores a failure so the head unit can always boot.
 // Jobs are one-shot, fixed-path, and bound to the installed verifier hash.
+//
+// Boot-time guard: if a pending job's binary hash does not match the installed
+// binary, the previous patch was interrupted or the firmware changed. In that
+// case the job is retained for inspection and no support-block change is
+// committed, preventing a transitional verifier state from surviving a reboot.
 func commitPendingBlock(loc Locations) (err error) {
 	if loc.PendingPath == "" {
 		return nil
@@ -53,6 +58,7 @@ func commitPendingBlock(loc Locations) (err error) {
 		return err
 	}
 	if fingerprint(installed) != job.BinarySHA256 {
+		// Firmware drifted: do not commit a stale job. Retain it for inspection.
 		return errors.New("pending support block belongs to a different verifier; job retained")
 	}
 	current, err := readOptionalFile(loc.BlockPath)

@@ -12,6 +12,17 @@ const binaryStates = {
     missing: 'Verifier not found',
 };
 const blockStates = { patched: 'Ready', other: 'Modified', absent: 'Missing' };
+const firmwareCompatibility = {
+    compatible: 'Compatible',
+    incompatible: 'Incompatible',
+    unknown: 'Unknown',
+};
+
+function fwCompatLabel(fw) {
+    const label = firmwareCompatibility[fw.compatibility] || fw.compatibility;
+    if (fw.id) return label + ' (' + fw.id + ')';
+    return label;
+}
 
 
 mgu.run({ start(ctx) {
@@ -20,21 +31,24 @@ mgu.run({ start(ctx) {
     let state = null, notice = '', statusError = '', busy = false, ended = false;
     let statusRead, pollTimer, confirmTimer, armed = null, armedAt = 0, armedState;
 
-    const stateKey = value => value && JSON.stringify([value.binary.sha256, value.binary.state, value.block.sha256, value.block.state, value.blockPending, value.binary.trust]);
+    const stateKey = value => value && JSON.stringify([value.firmware && value.firmware.compatibility, value.binary && value.binary.sha256, value.binary.state, value.block.sha256, value.block.state, value.blockPending, value.binary.trust]);
 
     function show() {
         if (ended) return;
-        const b = state && state.binary, k = state && state.block;
-        const summary = (b && b.keyUpdateRequired ? 'Signing key update required' : b && b.trust === 'replacement-only' ? 'Legacy patch' : b ? binaryStates[b.state] || b.state : 'Loading...')
+        const b = state && state.binary, k = state && state.block, fw = state && state.firmware;
+        const fwSummary = fw ? fw.compatibility === 'compatible' ? 'Firmware: ' + fwCompatLabel(fw) : 'Firmware: ' + fwCompatLabel(fw) + ' - patching refused' : '';
+        const summary = fwSummary + (fwSummary ? '. ' : '') + (b && b.keyUpdateRequired ? 'Signing key update required' : b && b.trust === 'replacement-only' ? 'Legacy patch' : b ? binaryStates[b.state] || b.state : 'Loading...')
             + (state && state.restartRequired ? '. Restart required.' : '');
         const backups = state && [state.binaryBackup && 'binary', state.blockBackup && 'support block'].filter(Boolean);
         const rows = {
             STATUS: statusError || notice || summary,
-            BTN_PATCH: armed === 'patch' ? 'Confirm patch' : 'Patch',
+            BTN_PATCH: (armed === 'patch' ? 'Confirm patch' : fw && fw.compatibility === 'incompatible' ? 'Patch (unsupported)' : 'Patch'),
             BTN_RESTORE: armed === 'restore' ? 'Confirm restore' : 'Restore backup',
             BTN_RESTART: armed === 'restart' ? 'Confirm restart' : 'Restart iDrive',
             DETAIL_TEXT: [
                 notice, statusError, summary,
+                fw && 'Firmware: ' + (fw.id || 'unknown') + ' (' + fw.source + ')',
+                fw && fw.message ? 'Note: ' + fw.message : '',
                 b && 'Keys: ' + (b.trust === 'oem-and-local' ? 'OEM + local' : b.trust === 'replacement-only' ? 'Local only' : 'OEM'),
                 state && state.blockPending && 'Support block: Pending',
                 b && 'Binary: ' + b.path,
@@ -91,6 +105,11 @@ mgu.run({ start(ctx) {
 
     async function operate(name) {
         if (ended || busy || !state) return;
+        if (name === 'patch' && state.firmware && state.firmware.compatibility === 'incompatible') {
+            notice = 'Firmware ' + (state.firmware.id || 'unknown') + ' is not supported for patching.';
+            show();
+            return;
+        }
         if (armed !== name || Date.now() - armedAt >= CONFIRM_MS) {
             disarm();
             armed = name;

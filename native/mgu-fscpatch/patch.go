@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"time"
 )
 
 const toolVersion = "1.0.0"
@@ -12,15 +15,84 @@ const blockAbsentSuffix = ".bup.absent"
 
 var absentBlockBackup = []byte("absent\n")
 
+// snapshotFile records the pre-patch system state so that restore can verify
+// it is restoring to the same firmware/build that was patched.
+type snapshotFile struct {
+	Version      string    `json:"version"`
+	FirmwareID   string    `json:"firmwareId"`
+	FirmwareName string    `json:"firmwareName"`
+	BinarySHA256 string    `json:"binarySha256"`
+	BinarySize   int64     `json:"binarySize"`
+	BlockSHA256  string    `json:"blockSha256,omitempty"`
+	BlockPresent bool      `json:"blockPresent"`
+	Patched      bool      `json:"patched"`
+	CreatedAt    time.Time `json:"createdAt"`
+}
+
 // applyPatch verifies the current binary, saves both original states, and
 // commits verified replacements. A retry can complete an interrupted patch.
+//
+// Before any live change, applyPatch validates firmware compatibility:
+//   - Unknown firmware is refused.
+//   - The binary must match a registered profile (SHA-256 + size).
 func applyPatch(loc Locations) (result Status, err error) {
+	// --- Pre-patch firmware validation -------------------------------------
+	var profile FirmwareProfile
+	if !loc.SkipFirmwareCheck {
+		fw := detectFirmware(loc)
+		if fw.Compatibility != FirmwareCompatible {
+			return Status{}, fmt.Errorf("firmware %q is not supported: %s", fw.ID, fw.Message)
+		}
+		p, ok := firmwareByID(fw.ID)
+		if !ok {
+			return Status{}, fmt.Errorf("no patch profile registered for firmware %q", fw.ID)
+		}
+		profile = p
+	} else {
+		// In test mode, use the default profile for buildDualProfile fallback.
+		profile = FirmwareProfile{
+			BinarySHA256:     dualStockHash,
+			BinarySize:       dualStockSize,
+			StockPattern:     stockPattern,
+			PatchedModulus:   patchedModulus,
+			StockModulusSHA:  stockModulusSHA256,
+			DualEntry:        dualEntry,
+			DualNote:         dualNote,
+			DualFile:         dualFile,
+			DualVA:           dualVA,
+			DualModulus:      dualModulus,
+			DualMagic:        dualMagic,
+			DualPrologue:     dualPrologue,
+			DualOriginalNote: dualOriginalNote,
+			DualPayload:      dualPayload,
+			DualLocalModulus: dualLocalModulus,
+		}
+	}
+
 	original, err := os.ReadFile(loc.BinaryPath)
 	if err != nil {
 		return Status{}, fmt.Errorf("cannot read %s: %w", loc.BinaryPath, err)
 	}
+
+	// Validate binary hash matches the registered profile.
+	if !loc.SkipFirmwareCheck {
+		originalSum := fingerprint(original)
+		if originalSum != profile.BinarySHA256 {
+			return Status{}, fmt.Errorf(
+				"binary SHA-256 %s does not match registered profile %s (%s); refusing to patch",
+				originalSum, profile.ID, profile.BinarySHA256,
+			)
+		}
+		if int64(len(original)) != profile.BinarySize {
+			return Status{}, fmt.Errorf(
+				"binary size %d does not match registered profile %s (%d); refusing to patch",
+				len(original), profile.ID, profile.BinarySize,
+			)
+		}
+	}
+
 	offset, state, _ := scanBinary(original)
-	if state == statePatternMissing || offset < 0 || int(offset)+len(patchedModulus) > len(original) {
+	if state == statePatternMissing || offset < 0 || int(offset)+len(profile.PatchedModulus) > len(original) {
 		return Status{}, errors.New("stock pattern not found; this BAC4x build is incompatible and needs the matching-SWFL flow")
 	}
 	block, err := readOptionalFile(loc.BlockPath)
@@ -44,9 +116,35 @@ func applyPatch(loc Locations) (result Status, err error) {
 			return Status{}, err
 		}
 	}
+
+	// --- Snapshot manifest (pre-patch) -------------------------------------
+	originalSum := fingerprint(original)
+	snap := &snapshotFile{
+		Version:      toolVersion,
+		FirmwareID:   profile.ID,
+		FirmwareName: profile.Name,
+		BinarySHA256: originalSum,
+		BinarySize:   int64(len(original)),
+		Patched:      state == statePatched,
+		CreatedAt:    time.Now().UTC(),
+	}
+	if block != nil {
+		snap.BlockSHA256 = fingerprint(block)
+		snap.BlockPresent = true
+	}
+	snapPath := filepath.Join(filepath.Dir(loc.BinaryPath), "fscpatch-snapshot-"+snap.CreatedAt.Format("20060102-150405")+".json")
+	snapData, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return Status{}, fmt.Errorf("cannot encode snapshot: %w", err)
+	}
+	// Write snapshot before any live modification (rollbacks will keep it).
+	if err := os.WriteFile(snapPath, snapData, 0644); err != nil {
+		return Status{}, fmt.Errorf("cannot write snapshot manifest: %w", err)
+	}
+
 	builder := loc.patchBinary
 	if builder == nil {
-		builder = buildDual
+		builder = func(stock []byte) ([]byte, error) { return buildDualProfile(stock, profile) }
 	}
 	patched, err := builder(stock)
 	if err != nil {
@@ -282,4 +380,143 @@ func fileMode(path string, fallback os.FileMode) os.FileMode {
 		return info.Mode()
 	}
 	return fallback
+}
+
+// checkPatch performs the same validation as applyPatch without writing
+// anything. It returns the expected post-patch status and the matching
+// firmware info, or an error if the patch would be refused.
+func checkPatch(loc Locations) (Status, FirmwareInfo, error) {
+	fw := detectFirmware(loc)
+	var profile FirmwareProfile
+	if !loc.SkipFirmwareCheck {
+		if fw.Compatibility != FirmwareCompatible {
+			return Status{}, fw, fmt.Errorf("firmware %q is not supported: %s", fw.ID, fw.Message)
+		}
+		p, ok := firmwareByID(fw.ID)
+		if !ok {
+			return Status{}, fw, fmt.Errorf("no patch profile registered for firmware %q", fw.ID)
+		}
+		profile = p
+	} else {
+		fw = FirmwareInfo{
+			ID:           dualStockHash,
+			Name:         "test fixture",
+			Compatibility: FirmwareCompatible,
+			Source:       "test",
+		}
+		profile = FirmwareProfile{
+			BinarySHA256:     dualStockHash,
+			BinarySize:       dualStockSize,
+			StockPattern:     stockPattern,
+			PatchedModulus:   patchedModulus,
+			StockModulusSHA:  stockModulusSHA256,
+			DualEntry:        dualEntry,
+			DualNote:         dualNote,
+			DualFile:         dualFile,
+			DualVA:           dualVA,
+			DualModulus:      dualModulus,
+			DualMagic:        dualMagic,
+			DualPrologue:     dualPrologue,
+			DualOriginalNote: dualOriginalNote,
+			DualPayload:      dualPayload,
+			DualLocalModulus: dualLocalModulus,
+		}
+	}
+
+	original, err := os.ReadFile(loc.BinaryPath)
+	if err != nil {
+		return Status{}, fw, fmt.Errorf("cannot read %s: %w", loc.BinaryPath, err)
+	}
+
+	if !loc.SkipFirmwareCheck {
+		if fingerprint(original) != profile.BinarySHA256 {
+			return Status{}, fw, fmt.Errorf(
+				"binary SHA-256 does not match registered profile; refusing to patch",
+			)
+		}
+		if int64(len(original)) != profile.BinarySize {
+			return Status{}, fw, fmt.Errorf(
+				"binary size does not match registered profile; refusing to patch",
+			)
+		}
+	}
+
+	offset, state, _ := scanBinary(original)
+	if state == statePatternMissing || offset < 0 || int(offset)+len(profile.PatchedModulus) > len(original) {
+		return Status{}, fw, errors.New("stock pattern not found; this BAC4x build is incompatible")
+	}
+	block, err := readOptionalFile(loc.BlockPath)
+	if err != nil {
+		return Status{}, fw, fmt.Errorf("cannot read support block: %w", err)
+	}
+
+	status, err := fullStatus(loc)
+	if err != nil {
+		return Status{}, fw, err
+	}
+	status.Message = "Patch would be accepted for this firmware"
+	_ = block
+	return status, fw, nil
+}
+
+// verifyBackupChain validates that all backups are internally consistent with
+// the current system state before any restore operation.
+func verifyBackupChain(loc Locations) error {
+	backup, err := readOptionalFile(loc.BinaryPath + binaryBackupSuffix)
+	if err != nil {
+		return err
+	}
+	if backup == nil {
+		return errors.New("no binary backup present; refusing to restore")
+	}
+	_, state, _ := scanBinary(backup)
+	if state != stateStock && state != stateStockVariant {
+		return errors.New("binary backup does not contain the stock pattern; refusing to restore it")
+	}
+	current, err := os.ReadFile(loc.BinaryPath)
+	if err != nil {
+		return err
+	}
+	if !matchingStockBackup(current, backup) {
+		return errors.New("binary backup does not match the installed build; refusing to restore it")
+	}
+	blockBackup, err := readOptionalFile(loc.BlockPath + blockBackupSuffix)
+	if err != nil {
+		return err
+	}
+	if blockBackup != nil {
+		if err := validateBlock(blockBackup); err != nil {
+			return fmt.Errorf("support block backup is malformed: %w", err)
+		}
+	}
+	absent, err := readOptionalFile(loc.BlockPath + blockAbsentSuffix)
+	if err != nil {
+		return err
+	}
+	if absent != nil && !bytes.Equal(absent, absentBlockBackup) {
+		return errors.New("invalid absent support block backup")
+	}
+	return nil
+}
+
+// saveSnapshotManifest writes a fresh snapshot to the given path.
+func saveSnapshotManifest(snapPath string, snap *snapshotFile) error {
+	data, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(snapPath, data, 0644)
+}
+
+// loadSnapshotManifest reads a previously written snapshot file.
+func loadSnapshotManifest(path string) (*snapshotFile, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var snap snapshotFile
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return nil, err
+	}
+	return &snap, nil
 }

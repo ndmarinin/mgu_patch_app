@@ -6,7 +6,9 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 // Locations names the unit files this tool inspects and patches. Tests build
@@ -18,6 +20,9 @@ type Locations struct {
 	PendingPath string
 	patchBinary func([]byte) ([]byte, error) // transaction-test dependency; nil uses strict production profile
 	mergeBlock  func([]byte, []byte) ([]byte, error)
+	// SkipFirmwareCheck is set by tests that use synthetic fixtures whose
+	// SHA-256 is not in the production firmware registry.
+	SkipFirmwareCheck bool
 }
 
 func unitLocations() Locations {
@@ -67,14 +72,15 @@ type BlockStatus struct {
 }
 
 type Status struct {
-	BlockPending    bool         `json:"blockPending"`
-	Version         string       `json:"version"`
-	Binary          BinaryStatus `json:"binary"`
-	Block           BlockStatus  `json:"block"`
-	BinaryBackup    bool         `json:"binaryBackup"`
-	BlockBackup     bool         `json:"blockBackup"`
-	RestartRequired bool         `json:"restartRequired"`
-	Message         string       `json:"message"`
+	BlockPending    bool            `json:"blockPending"`
+	Version         string          `json:"version"`
+	Binary          BinaryStatus    `json:"binary"`
+	Block           BlockStatus     `json:"block"`
+	BinaryBackup    bool            `json:"binaryBackup"`
+	BlockBackup     bool            `json:"blockBackup"`
+	RestartRequired bool            `json:"restartRequired"`
+	Firmware        FirmwareInfo    `json:"firmware"`
+	Message         string          `json:"message"`
 }
 
 func fingerprint(b []byte) string {
@@ -188,6 +194,7 @@ func fullStatus(loc Locations) (Status, error) {
 		BlockPending:    loc.PendingPath != "" && fileExists(loc.PendingPath),
 		Binary:          binary,
 		Block:           block,
+		Firmware:        firmwareStatus(loc),
 		BinaryBackup:    fileExists(loc.BinaryPath + binaryBackupSuffix),
 		BlockBackup:     fileExists(loc.BlockPath+blockBackupSuffix) || fileExists(loc.BlockPath+blockAbsentSuffix),
 	}, nil
@@ -196,4 +203,118 @@ func fullStatus(loc Locations) (Status, error) {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// detectFirmware reads the running firmware version from BMW version files,
+// falling back to the verifier binary's SHA-256. It reports compatibility
+// against the firmware registry.
+func detectFirmware(loc Locations) FirmwareInfo {
+	// Try BMW version files first.
+	if info, ok := firmwareFromVersionFile(); ok {
+		if profile, ok := firmwareByID(info.ID); ok {
+			return FirmwareInfo{
+				ID:           info.ID,
+				Name:         profile.Name,
+				Compatibility: FirmwareCompatible,
+				Source:       "version-file",
+				BinarySHA256: info.BinarySHA256,
+				BinarySize:   info.BinarySize,
+				Message:      "firmware is supported for patching",
+			}
+		}
+		return FirmwareInfo{
+			ID:           info.ID,
+			Name:         info.Name,
+			Compatibility: FirmwareIncompatible,
+			Source:       "version-file",
+			BinarySHA256: info.BinarySHA256,
+			BinarySize:   info.BinarySize,
+			Message:      "firmware build is not in the compatibility registry; patching is refused",
+		}
+	}
+
+	// Fall back to the verifier binary's SHA-256.
+	if info, ok := firmwareFromBinaryHash(loc); ok {
+		if profile, ok := firmwareByID(info.ID); ok {
+			return FirmwareInfo{
+				ID:           info.ID,
+				Name:         profile.Name,
+				Compatibility: FirmwareCompatible,
+				Source:       "binary-hash",
+				BinarySHA256: info.BinarySHA256,
+				BinarySize:   info.BinarySize,
+				Message:      "firmware is supported for patching",
+			}
+		}
+		return FirmwareInfo{
+			ID:           info.ID,
+			Name:         "BAC4x verifier binary",
+			Compatibility: FirmwareUnknown,
+			Source:       "binary-hash",
+			BinarySHA256: info.BinarySHA256,
+			BinarySize:   info.BinarySize,
+			Message:      "verifier build is not recognized; patching is refused",
+		}
+	}
+
+	return FirmwareInfo{
+		ID:           "",
+		Name:         "unknown",
+		Compatibility: FirmwareUnknown,
+		Source:       "fallback",
+		Message:      "could not detect firmware version; patching is refused",
+	}
+}
+
+// versionFileInfo reads BMW firmware version files and returns the firmware ID.
+type versionFileInfo struct {
+	ID           string
+	Name         string
+	BinarySHA256 string
+	BinarySize   int64
+}
+
+// firmwareFromVersionFile tries common BMW version files.
+func firmwareFromVersionFile() (versionFileInfo, bool) {
+	candidates := []string{
+		"/etc/version",
+		"/etc/mgu_version",
+		"/var/opt/mgu/version",
+		"/usr/share/mgu/version",
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		id := strings.TrimSpace(string(data))
+		if id == "" {
+			continue
+		}
+		return versionFileInfo{
+			ID:   id,
+			Name: id,
+		}, true
+	}
+	return versionFileInfo{}, false
+}
+
+// firmwareFromBinaryHash reads the verifier binary and returns its SHA-256.
+func firmwareFromBinaryHash(loc Locations) (versionFileInfo, bool) {
+	data, err := os.ReadFile(loc.BinaryPath)
+	if err != nil {
+		return versionFileInfo{}, false
+	}
+	sum := sha256.Sum256(data)
+	return versionFileInfo{
+		ID:           hex.EncodeToString(sum[:]),
+		Name:         filepath.Base(loc.BinaryPath),
+		BinarySHA256: hex.EncodeToString(sum[:]),
+		BinarySize:   int64(len(data)),
+	}, true
+}
+
+// firmwareStatus merges firmware detection into a Status.
+func firmwareStatus(loc Locations) FirmwareInfo {
+	return detectFirmware(loc)
 }

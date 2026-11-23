@@ -60,6 +60,7 @@ const stockStatus = () => ({
     binary: { path: '/usr/bin/BAC4x_VSTAR_i386_Eth_Application.out', sha256: 'aaaaaaaaaaaaaaaa', offset: 2592708, state: 'stock' },
     block: { sha256: 'bbbbbbbbbbbbbbbb', state: 'other' },
     binaryBackup: false, blockBackup: false,
+    firmware: { id: 'test-fixture', compatibility: 'compatible', source: 'test', message: 'test' },
 });
 
 test('a previous signing key is reported as requiring a patch update', async () => {
@@ -68,7 +69,7 @@ test('a previous signing key is reported as requiring a patch update', async () 
         keyUpdateRequired: true, signingKeySha256: 'previous-local-key',
     } }));
     await flush();
-    assert.equal(t.rows.STATUS, 'Signing key update required');
+    assert.match(t.rows.STATUS, /Signing key update required/);
     assert.match(t.rows.DETAIL_TEXT, /Local key SHA-256: previous-local-key/);
     t.shutdown();
 });
@@ -100,7 +101,7 @@ test('legacy key swap is identified and pending support block is visible', async
     const t = loadApp(async () => ({ ...stockStatus(), blockPending: true,
         binary: { ...stockStatus().binary, state: 'patched', trust: 'replacement-only' } }));
     await flush();
-    assert.equal(t.rows.STATUS, 'Legacy patch');
+    assert.match(t.rows.STATUS, /Legacy patch/);
     assert.match(t.rows.DETAIL_TEXT, /Keys: Local only/);
     assert.match(t.rows.DETAIL_TEXT, /Support block: Pending/);
     t.shutdown();
@@ -114,7 +115,7 @@ test('FSC Patch exposes its actions as native menu buttons and refreshes once', 
     });
     await flush();
     assert.equal(app.screens[0].kind, 'menu');
-    assert.equal(t.rows.STATUS, 'Stock');
+    assert.match(t.rows.STATUS, /Firmware: Compatible.*Stock/);
     assert.match(t.rows.DETAIL_TEXT, /SHA-256: aaaaaaaaaaaa/);
     assert.match(t.rows.DETAIL_TEXT, /Service 0\.1\.1/);
     await t.callbacks.BTN_DETAILS();
@@ -192,7 +193,7 @@ test('a missing service is reported and the app recovers on the next refresh', a
     assert.equal(t.rows.BTN_PATCH, 'Patch');
     available = true;
     await t.advance(2000);
-    assert.equal(t.rows.STATUS, 'Stock');
+    assert.match(t.rows.STATUS, /Firmware: Compatible.*Stock/);
     t.shutdown();
 });
 
@@ -260,7 +261,7 @@ test('support-block differences do not mislabel the working FSC verifier', async
             block: { ...stockStatus().block, state: blockState },
         }));
         await flush();
-        assert.equal(t.rows.STATUS, 'Patched');
+        assert.match(t.rows.STATUS, /Firmware: Compatible.*Patched/);
         assert.ok(t.rows.DETAIL_TEXT.includes('Support block: ' + expected));
         assert.doesNotMatch(t.rows.DETAIL_TEXT, /Support block: unpatched/);
         t.shutdown();

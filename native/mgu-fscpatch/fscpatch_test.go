@@ -30,7 +30,7 @@ func testLoc(t *testing.T, binary []byte, block []byte, withBlock bool) Location
 	if err := os.WriteFile(binaryPath, binary, 0644); err != nil {
 		t.Fatal(err)
 	}
-	loc := Locations{BinaryPath: binaryPath, BlockPath: filepath.Join(dir, "block_352"), Remount: false, patchBinary: func(b []byte) ([]byte, error) { return patchedFixture(b), nil }, mergeBlock: func(_, _ []byte) ([]byte, error) { return block352, nil }}
+	loc := Locations{BinaryPath: binaryPath, BlockPath: filepath.Join(dir, "block_352"), Remount: false, SkipFirmwareCheck: true, patchBinary: func(b []byte) ([]byte, error) { return patchedFixture(b), nil }, mergeBlock: func(_, _ []byte) ([]byte, error) { return block352, nil }}
 	if withBlock {
 		if err := os.MkdirAll(filepath.Dir(loc.BlockPath), 0755); err != nil {
 			t.Fatal(err)
@@ -170,7 +170,7 @@ func TestPatchRefusesIncompatibleBuild(t *testing.T) {
 	if err == nil || err.Error() != "stock pattern not found; this BAC4x build is incompatible and needs the matching-SWFL flow" {
 		t.Fatalf("expected incompatible-build refusal, got: %v", err)
 	}
-	loc2 := Locations{BinaryPath: filepath.Join(t.TempDir(), "absent.out"), BlockPath: filepath.Join(t.TempDir(), "block_352"), Remount: false}
+	loc2 := Locations{BinaryPath: filepath.Join(t.TempDir(), "absent.out"), BlockPath: filepath.Join(t.TempDir(), "block_352"), Remount: false, SkipFirmwareCheck: true}
 	if _, err := applyPatch(loc2); err == nil {
 		t.Fatal("expected missing-binary error")
 	}

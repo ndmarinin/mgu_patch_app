@@ -70,7 +70,21 @@ func TestStrictDualProfileAndTamperDetection(t *testing.T) {
 	copy(stock[dualNote:], dualOriginalNote)
 	copy(stock[dualEntry:], dualPrologue)
 	hash := fingerprint(stock)
-	patched, err := buildDualProfile(stock, hash)
+	profile := FirmwareProfile{
+		BinarySHA256:     hash,
+		BinarySize:       dualStockSize,
+		DualEntry:        dualEntry,
+		DualNote:         dualNote,
+		DualFile:         dualFile,
+		DualVA:           dualVA,
+		DualModulus:      dualModulus,
+		DualMagic:        dualMagic,
+		DualPrologue:     dualPrologue,
+		DualOriginalNote: dualOriginalNote,
+		DualPayload:      dualPayload,
+		DualLocalModulus: dualLocalModulus,
+	}
+	patched, err := buildDualProfile(stock, profile)
 	if err != nil {
 		t.Fatal(err)
 	}
